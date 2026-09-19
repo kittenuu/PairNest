@@ -97,23 +97,35 @@ function pageToText(r, includeLinks) {
   return parts.join('\n')
 }
 
-// DuckDuckGo 的无脚本版页面结构稳定，适合拿来提结果。
-const SEARCH_URL = q => `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`
+// 搜索走 Bing：DuckDuckGo、Mojeek、Startpage、Brave 在服务器上访问都会给挑战页或 403，
+// 实测只有 Bing 正常返回结果。
+const SEARCH_URL = q => `https://www.bing.com/search?q=${encodeURIComponent(q)}`
 const SEARCH_EXTRACT = `(() => {
+  // 结果链接套了一层跳转，真实地址在 u 参数里：去掉 a1 前缀再 base64 解码
+  const real = raw => {
+    try {
+      let s = String(raw).replace(/^a1/, '').replace(/-/g, '+').replace(/_/g, '/')
+      while (s.length % 4) s += '='
+      const bin = atob(s)
+      const bytes = Uint8Array.from(bin, c => c.charCodeAt(0))
+      return new TextDecoder().decode(bytes)
+    } catch (e) { return null }
+  }
   const out = []
-  for (const row of document.querySelectorAll('.result, .web-result')) {
-    const a = row.querySelector('a.result__a')
+  for (const li of document.querySelectorAll('li.b_algo')) {
+    const a = li.querySelector('h2 a')
     if (!a) continue
     let href = a.href
     try {
-      // 搜索页的链接套了一层跳转，把真实地址解出来
-      const u = new URL(href, location.href)
-      const real = u.searchParams.get('uddg')
-      if (real) href = real
+      const u = new URL(href, location.href).searchParams.get('u')
+      if (u) { const r = real(u); if (r) href = r }
     } catch (e) {}
-    const snip = row.querySelector('.result__snippet')
-    out.push({ title: (a.innerText || '').trim(), href,
-               snippet: snip ? (snip.innerText || '').trim() : '' })
+    if (!/^https?:/i.test(href)) continue
+    // innerText 在无头浏览器里对这些节点会返回空，必须用 textContent
+    const title = (a.textContent || '').trim()
+    if (!title) continue
+    const cap = li.querySelector('.b_caption p') || li.querySelector('p')
+    out.push({ title, href, snippet: cap ? (cap.textContent || '').trim().slice(0, 300) : '' })
     if (out.length >= 25) break
   }
   return out

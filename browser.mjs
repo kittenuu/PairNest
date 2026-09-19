@@ -186,6 +186,17 @@ export function createBrowser(opts = {}) {
   let busy = Promise.resolve()
   let lastError = ''
   let visits = 0
+  let realUA = ''
+
+  // 无头模式的 UA 会自报 HeadlessChrome，不少网站看到就给降级页面甚至直接拦掉。
+  // 这里只把它换回同一个版本的普通 Chrome 标识 —— 版本跟着实际浏览器走，
+  // 不冒充别的浏览器，只是不再主动声明自己是无头的。
+  async function captureUA() {
+    try {
+      const v = await conn.send('Browser.getVersion')
+      realUA = String(v.userAgent || '').replace('HeadlessChrome', 'Chrome')
+    } catch { realUA = '' }
+  }
 
   const touchIdle = () => {
     clearTimeout(idleTimer)
@@ -231,6 +242,7 @@ export function createBrowser(opts = {}) {
     const alive = await adopt()
     if (alive) {
       conn = await Conn.open(alive)
+      await captureUA()
       startedAt = Date.now()
       log('PairNest 浏览器：接管了上次留下的 Chrome')
       touchIdle()
@@ -256,6 +268,8 @@ export function createBrowser(opts = {}) {
       '--disable-background-networking',
       '--disable-sync',
       '--disable-extensions',
+      // 无头 Chrome 默认会把 navigator.webdriver 标成 true，很多站点据此给降级内容
+      '--disable-blink-features=AutomationControlled',
       '--mute-audio',
       '--window-size=1280,800',
       '--metrics-recording-only',
@@ -269,6 +283,7 @@ export function createBrowser(opts = {}) {
 
     const { port, path } = await readDevToolsPort()
     conn = await Conn.open(`ws://127.0.0.1:${port}${path}`)
+    await captureUA()
     startedAt = Date.now()
     log(`PairNest 浏览器已启动：${chrome}`)
     touchIdle()
@@ -337,6 +352,10 @@ export function createBrowser(opts = {}) {
     await conn.send('Runtime.enable', {}, sessionId)
     await conn.send('Emulation.setDeviceMetricsOverride',
       { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false }, sessionId)
+    if (realUA) {
+      await conn.send('Emulation.setUserAgentOverride',
+        { userAgent: realUA, acceptLanguage: 'zh-CN,zh;q=0.9,en;q=0.8' }, sessionId).catch(() => {})
+    }
 
     const loaded = new Promise(resolve => {
       const off = conn.on(msg => {
