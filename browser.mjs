@@ -314,7 +314,12 @@ export function createBrowser(opts = {}) {
   // 所有页面操作排队串行，避免并发把小机器的内存打爆。
   function queue(fn) {
     const run = busy.then(fn, fn)
-    busy = run.then(() => {}, () => {})
+    // 排队是串行的，所以一个卡住的操作会把后面所有请求一起拖死。
+    // 给接力棒单独设一个上限：到点就放行下一个，当前这次仍按自己的结果返回。
+    busy = Promise.race([
+      run.then(() => {}, () => {}),
+      sleep(Math.max(navTimeout * 3, 45000)),
+    ])
     return run
   }
 
@@ -333,9 +338,20 @@ export function createBrowser(opts = {}) {
     }
   }
 
-  // 拦下页面发出的每一个请求逐个校验，挡住重定向绕过和内网子资源。
+  // 拦下请求逐个校验，挡住重定向绕过和内网地址。
+  //
+  // 只拦会把内容送回调用者手里的那几类：Document 是导航本身，XHR / Fetch 是脚本
+  // 能读到响应的路径 —— 数据要外泄只能走这三条。图片、样式、字体、媒体不拦：
+  // 它们即使指向内网也读不回内容，而一个重型页面动辄几百个这样的请求，全部排队
+  // 过检会把整条队列堵死（实测抖音因此 45 秒都打不开）。
   async function guard(sessionId, priv) {
-    await conn.send('Fetch.enable', { patterns: [{ urlPattern: '*' }] }, sessionId)
+    await conn.send('Fetch.enable', {
+      patterns: [
+        { urlPattern: '*', resourceType: 'Document', requestStage: 'Request' },
+        { urlPattern: '*', resourceType: 'XHR', requestStage: 'Request' },
+        { urlPattern: '*', resourceType: 'Fetch', requestStage: 'Request' },
+      ],
+    }, sessionId)
     const blocked = []
     const off = conn.on(async msg => {
       if (msg.method !== 'Fetch.requestPaused' || msg.sessionId !== sessionId) return
