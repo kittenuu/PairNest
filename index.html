@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#12141a">
+<title>窗</title>
+<style>
+  :root{
+    --bg:#12141a; --card:#1b1e26; --line:#2c303c; --ink:#e6e6ea;
+    --sub:#8b90a0; --key:#5b8cff; --warn:#ff8098;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{height:100%;margin:0}
+  body{
+    background:var(--bg);color:var(--ink);
+    font-family:-apple-system,"PingFang SC","Hiragino Sans GB",sans-serif;
+    padding:max(12px,env(safe-area-inset-top)) 12px calc(12px + env(safe-area-inset-bottom));
+    display:flex;flex-direction:column;gap:10px;min-height:100dvh
+  }
+  header{display:flex;align-items:center;gap:8px}
+  header h1{font-size:16px;margin:0;font-weight:600}
+  header .st{font-size:11.5px;color:var(--sub);margin-left:auto;text-align:right;line-height:1.5}
+  .bar{display:flex;gap:7px}
+  .bar input{
+    flex:1;min-width:0;font:inherit;font-size:15px;padding:11px 13px;
+    border:1px solid var(--line);border-radius:12px;background:var(--card);color:var(--ink);outline:none
+  }
+  .bar input:focus{border-color:var(--key)}
+  .bar button{
+    font:inherit;font-size:14px;font-weight:600;padding:11px 16px;border:0;
+    border-radius:12px;background:var(--key);color:#fff;white-space:nowrap
+  }
+  .screen{
+    position:relative;flex:1;min-height:200px;background:var(--card);
+    border:1px solid var(--line);border-radius:14px;overflow:hidden;display:grid;place-items:center
+  }
+  .screen img{width:100%;display:block;cursor:crosshair}
+  .screen .hint{font-size:13px;color:var(--sub);text-align:center;padding:28px;line-height:1.9}
+  .tap{
+    position:absolute;width:28px;height:28px;margin:-14px 0 0 -14px;border-radius:50%;
+    border:2px solid var(--key);pointer-events:none;animation:tap .5s ease-out forwards
+  }
+  @keyframes tap{from{transform:scale(.4);opacity:1}to{transform:scale(1.7);opacity:0}}
+  .row{display:flex;gap:6px}
+  .row button{
+    flex:1;font:inherit;font-size:13px;font-weight:600;padding:11px 4px;
+    border:1px solid var(--line);border-radius:11px;background:var(--card);color:var(--ink)
+  }
+  .row button:active{transform:translateY(1px)}
+  .row button.on{background:var(--key);border-color:var(--key);color:#fff}
+  .note{font-size:11.5px;color:var(--sub);line-height:1.7;word-break:break-all}
+  .note b{color:var(--warn)}
+</style>
+</head>
+<body>
+<header>
+  <h1>窗</h1>
+  <div class="st" id="st">…</div>
+</header>
+
+<div class="bar">
+  <input id="url" type="url" inputmode="url" autocomplete="off" autocapitalize="off"
+         spellcheck="false" placeholder="网址，比如 douyin.com">
+  <button id="go">进去</button>
+</div>
+
+<div class="screen" id="screen">
+  <div class="hint" id="hint">输一个网址进去<br>这里就能看见它，点哪儿是哪儿</div>
+</div>
+
+<div class="row">
+  <button id="up">↑ 上翻</button>
+  <button id="down">↓ 下翻</button>
+  <button id="back">‹ 返回</button>
+  <button id="reload">⟳ 刷新</button>
+</div>
+<div class="row">
+  <button id="live" class="on">● 实时</button>
+  <button id="off">✕ 关掉</button>
+</div>
+
+<div class="bar">
+  <input id="text" placeholder="先点网页里的输入框，再在这里打字">
+  <button id="send">填进去</button>
+</div>
+
+<div class="note" id="note">
+  要登录的网站，扫码和密码都<b>你自己来</b>。登录一次长期留着。<br>
+  <b>别登支付类、银行类账号。</b>
+</div>
+
+<script>
+const $ = id => document.getElementById(id)
+const esc = t => String(t == null ? '' : t)
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;').replace(/'/g, '&#39;')
+
+// 画面按比例缩放显示，点击时再换算回网页自己的坐标系
+let VW = 390, VH = 844, busy = false, live = true, objUrl = null, timer = null
+
+function setImg(blob){
+  const scr = $('screen')
+  const old = objUrl
+  objUrl = URL.createObjectURL(blob)
+  let img = scr.querySelector('img')
+  if (!img){
+    scr.innerHTML = ''
+    img = document.createElement('img')
+    img.alt = '网页画面'
+    scr.appendChild(img)
+    img.addEventListener('click', tap)
+  }
+  img.src = objUrl
+  if (old) setTimeout(() => URL.revokeObjectURL(old), 400)
+}
+
+async function shot(){
+  if (busy) return
+  try{
+    const r = await fetch('/api/session/shot?q=55', { cache: 'no-store' })
+    if (!r.ok) return
+    const s = (r.headers.get('X-View-Size') || '').split('x')
+    if (s.length === 2){ VW = +s[0] || VW; VH = +s[1] || VH }
+    setImg(await r.blob())
+  }catch(e){}
+}
+
+async function tap(e){
+  const img = e.currentTarget, r = img.getBoundingClientRect()
+  const x = Math.round((e.clientX - r.left) / r.width * VW)
+  const y = Math.round((e.clientY - r.top) / r.height * VH)
+  const dot = document.createElement('div')
+  dot.className = 'tap'
+  dot.style.left = (e.clientX - r.left) + 'px'
+  dot.style.top = (e.clientY - r.top) + 'px'
+  img.parentNode.appendChild(dot)
+  setTimeout(() => dot.remove(), 500)
+  await act({ type: 'click', x, y })
+}
+
+const WHY = {
+  no_session: '还没打开页面。',
+  address_not_allowed: '这个地址指向内网，被挡下了。',
+  protocol_not_allowed: '只能开 http 和 https。',
+  chrome_not_found: '服务器上没装 Chrome。',
+  invalid_url: '这个网址看不懂。',
+}
+
+async function act(a){
+  if (busy) return
+  busy = true
+  try{
+    const r = await fetch('/api/session/act', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(a) })
+    const d = await r.json()
+    if (!r.ok || d.error){
+      $('note').innerHTML = '<b>' + esc(WHY[d.error] || d.error) + '</b>'
+    }else if (d.url){
+      $('note').innerHTML = esc(String(d.title || '').slice(0, 40)) + '<br>' + esc(d.url)
+    }
+  }catch(e){}
+  finally{ busy = false; shot() }
+}
+
+async function open_(){
+  let u = ($('url').value || '').trim()
+  if (!u) return
+  if (!/^https?:\/\//i.test(u)){ u = 'https://' + u; $('url').value = u }
+  const hint = $('hint')
+  if (hint) hint.textContent = '正在打开，第一次要等浏览器起来…'
+  busy = true
+  try{
+    const r = await fetch('/api/session/open', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: u, viewport: { width: 390, height: 844, mobile: true } }) })
+    const d = await r.json()
+    if (!r.ok || d.error){
+      $('screen').innerHTML = '<div class="hint"><b style="color:var(--warn)">'
+        + esc(WHY[d.error] || d.error || '打不开') + '</b></div>'
+      return
+    }
+    $('note').innerHTML = esc(String(d.title || '').slice(0, 40))
+  }catch(e){}
+  finally{ busy = false; shot(); status() }
+}
+
+async function status(){
+  try{
+    const d = await (await fetch('/api/browser')).json()
+    if (d.error) return
+    $('st').innerHTML = (d.running ? '浏览器开着' : '浏览器关着')
+      + (d.session ? ' · 有页面' : '')
+      + (d.visits ? '<br>看过 ' + d.visits + ' 个' : '')
+  }catch(e){}
+}
+
+$('go').onclick = open_
+$('url').onkeydown = e => { if (e.key === 'Enter'){ e.preventDefault(); $('url').blur(); open_() } }
+$('down').onclick = () => act({ type: 'scroll' })
+$('up').onclick = () => act({ type: 'scroll', dy: -700 })
+$('back').onclick = () => act({ type: 'back' })
+$('reload').onclick = () => act({ type: 'reload' })
+$('send').onclick = async () => {
+  const t = $('text')
+  if (!t.value) return
+  await act({ type: 'type', text: t.value })
+  t.value = ''
+}
+$('text').onkeydown = async e => {
+  if (e.key !== 'Enter') return
+  e.preventDefault(); $('text').blur()
+  if ($('text').value){ await act({ type: 'type', text: $('text').value }); $('text').value = '' }
+  await act({ type: 'key', key: 'Enter' })
+}
+$('live').onclick = () => {
+  live = !live
+  $('live').classList.toggle('on', live)
+  $('live').textContent = live ? '● 实时' : '○ 暂停'
+}
+$('off').onclick = async () => {
+  try{ await fetch('/api/session/close', { method: 'POST' }) }catch(e){}
+  $('screen').innerHTML = '<div class="hint">已经关掉了。<br>登录状态还留着，下次进来还在。</div>'
+  status()
+}
+
+// 已经有开着的页面就直接接上
+fetch('/api/browser').then(r => r.json()).then(d => { if (d && d.session) shot() }).catch(() => {})
+status()
+timer = setInterval(() => { if (live && !busy) shot() }, 1800)
+setInterval(status, 15000)
+</script>
+</body>
+</html>
