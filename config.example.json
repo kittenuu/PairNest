@@ -4,8 +4,10 @@
   "auth": {
     "password": "",
     "secret": "",
-    "apiToken": ""
+    "apiToken": "",
+    "mcpToken": ""
   },
+  "publicUrl": "",
   "startDate": "2026-01-01",
   "parents": {
     "me": {
@@ -29,7 +31,8 @@
     "keyring": false,
     "memories": false,
     "handoff": false,
-    "browser": false
+    "browser": false,
+    "mcp": false
   },
   "browser": {
     "allowPrivate": false,

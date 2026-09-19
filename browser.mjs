@@ -313,13 +313,13 @@ export function createBrowser(opts = {}) {
   }
 
   // 拦下页面发出的每一个请求逐个校验，挡住重定向绕过和内网子资源。
-  async function guard(sessionId) {
+  async function guard(sessionId, priv) {
     await conn.send('Fetch.enable', { patterns: [{ urlPattern: '*' }] }, sessionId)
     const blocked = []
     const off = conn.on(async msg => {
       if (msg.method !== 'Fetch.requestPaused' || msg.sessionId !== sessionId) return
       const { requestId, request } = msg.params
-      const verdict = await checkUrl(request.url, { allowPrivate })
+      const verdict = await checkUrl(request.url, { allowPrivate: priv })
       try {
         if (verdict.ok) await conn.send('Fetch.continueRequest', { requestId }, sessionId)
         else {
@@ -361,12 +361,13 @@ export function createBrowser(opts = {}) {
   }
 
   // 读一个网页：标题、正文、链接。
-  async function read(rawUrl, { maxChars = 20000, maxLinks = 100 } = {}) {
-    const verdict = await checkUrl(rawUrl, { allowPrivate })
+  async function read(rawUrl, { maxChars = 20000, maxLinks = 100, allowPrivate: ap } = {}) {
+    const priv = ap === undefined ? allowPrivate : !!ap
+    const verdict = await checkUrl(rawUrl, { allowPrivate: priv })
     if (!verdict.ok) throw Object.assign(new Error(verdict.why), { statusCode: 400 })
 
     return queue(() => withPage(async sessionId => {
-      const g = await guard(sessionId)
+      const g = await guard(sessionId, priv)
       const t0 = Date.now()
       try {
         const finished = await goto(sessionId, verdict.url)
@@ -397,12 +398,13 @@ export function createBrowser(opts = {}) {
   }
 
   // 给一个网页拍张照。
-  async function shot(rawUrl, { fullPage = false } = {}) {
-    const verdict = await checkUrl(rawUrl, { allowPrivate })
+  async function shot(rawUrl, { fullPage = false, allowPrivate: ap } = {}) {
+    const priv = ap === undefined ? allowPrivate : !!ap
+    const verdict = await checkUrl(rawUrl, { allowPrivate: priv })
     if (!verdict.ok) throw Object.assign(new Error(verdict.why), { statusCode: 400 })
 
     return queue(() => withPage(async sessionId => {
-      const g = await guard(sessionId)
+      const g = await guard(sessionId, priv)
       try {
         await goto(sessionId, verdict.url)
         const title = await evalIn(sessionId, 'document.title')
@@ -419,12 +421,13 @@ export function createBrowser(opts = {}) {
   }
 
   // 在页面里跑一段 JS。能力很深，所以由调用方用独立开关控制是否放行。
-  async function script(rawUrl, expression) {
-    const verdict = await checkUrl(rawUrl, { allowPrivate })
+  async function script(rawUrl, expression, { allowPrivate: ap } = {}) {
+    const priv = ap === undefined ? allowPrivate : !!ap
+    const verdict = await checkUrl(rawUrl, { allowPrivate: priv })
     if (!verdict.ok) throw Object.assign(new Error(verdict.why), { statusCode: 400 })
 
     return queue(() => withPage(async sessionId => {
-      const g = await guard(sessionId)
+      const g = await guard(sessionId, priv)
       try {
         await goto(sessionId, verdict.url)
         const value = await evalIn(sessionId, `(async () => { return (${expression}) })()`)

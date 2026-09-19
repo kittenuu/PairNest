@@ -6,6 +6,7 @@ import { existsSync } from 'node:fs'
 import { join, dirname, extname, resolve, sep, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createBrowser } from './browser.mjs'
+import { createMcp } from './mcp.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 // 云平台可以把持久磁盘挂载到独立目录；本机运行时仍默认写在项目目录。
@@ -41,9 +42,15 @@ if (!CFG.auth.apiToken) {
   CFG.auth.apiToken = randomBytes(32).toString('base64url')
   generatedCredentials = true
 }
+if (!CFG.auth.mcpToken) {
+  // 这个会出现在 MCP 连接器的网址里，和 apiToken 分开，万一泄漏可以单独换。
+  CFG.auth.mcpToken = randomBytes(32).toString('base64url')
+  generatedCredentials = true
+}
 const AUTH_PASSWORD = String(process.env.PAIRNEST_PASSWORD || CFG.auth.password)
 const AUTH_SECRET = String(process.env.PAIRNEST_AUTH_SECRET || CFG.auth.secret)
 const API_TOKEN = String(process.env.PAIRNEST_API_TOKEN || CFG.auth.apiToken)
+const MCP_TOKEN = String(process.env.PAIRNEST_MCP_TOKEN || CFG.auth.mcpToken)
 
 if (firstRun || generatedCredentials) {
   await writeFile(CONFIG_FILE, JSON.stringify(CFG, null, 2) + '\n', { mode: 0o600 })
@@ -68,7 +75,7 @@ if (!Number.isInteger(PORT_CFG) || PORT_CFG < 1 || PORT_CFG > 65535) {
   throw new Error(`无效端口：${process.env.PORT || CFG.port}`)
 }
 const FEATURES = Object.assign(
-  { location: false, keyring: false, memories: false, handoff: false, browser: false },
+  { location: false, keyring: false, memories: false, handoff: false, browser: false, mcp: false },
   CFG.features || {},
 )
 
@@ -84,6 +91,10 @@ const BROWSER = createBrowser({
   proxy: process.env.PAIRNEST_BROWSER_PROXY || BROWSER_CFG.proxy || '',
   log: msg => console.log(msg),
 })
+
+// 把小窗作为 MCP 工具递出去，让 Claude 这类客户端能直接用。
+const MCP = createMcp({ browser: BROWSER, token: MCP_TOKEN })
+const PUBLIC_URL = String(CFG.publicUrl || process.env.PAIRNEST_PUBLIC_URL || '').replace(/\/+$/, '')
 
 // 高德地图：不填就退回免费的 Nominatim 反查，只是没有地图底图
 const AMAP = CFG.amap || null
@@ -359,6 +370,14 @@ const server = createServer(async (req, res) => {
   try {
     // 反向代理和容器可以用这个端点探活；它不返回任何私人数据。
     if (p === '/healthz') return J(res, { ok: true })
+
+    // MCP 端点自带认证（密钥在网址里），所以放在网页登录检查之前。
+    // 两个开关都打开才对外提供；没开时连路径存在与否都不透露。
+    if (p === '/mcp' || p.startsWith('/mcp/')) {
+      if (!FEATURES.mcp || !FEATURES.browser) { res.writeHead(404); return res.end('404') }
+      if (await MCP.handle(req, res, p, readBody)) return
+      res.writeHead(404); return res.end('404')
+    }
 
     if (p === '/login' && req.method === 'GET') {
       if (authenticated(req)) { res.writeHead(302, { Location: '/' }); return res.end() }
@@ -871,7 +890,15 @@ const server = createServer(async (req, res) => {
   }
 })
 
-server.listen(PORT, HOST_CFG, () => console.log(`PairNest on http://${HOST_CFG}:${PORT}`))
+server.listen(PORT, HOST_CFG, () => {
+  console.log(`PairNest on http://${HOST_CFG}:${PORT}`)
+  if (FEATURES.mcp && FEATURES.browser) {
+    console.log(PUBLIC_URL
+      ? `MCP 连接器地址：${PUBLIC_URL}/mcp/${MCP_TOKEN}`
+      : `MCP 端点路径：/mcp/${MCP_TOKEN}（前面拼上你自己的 https 地址）`)
+    console.log('这个网址本身就是凭据，不要发给别人、不要截图公开。')
+  }
+})
 
 // 服务停掉时别在机器上留一个没人管的 Chrome 进程。
 for (const sig of ['SIGINT', 'SIGTERM']) {
