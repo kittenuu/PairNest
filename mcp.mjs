@@ -97,39 +97,69 @@ function pageToText(r, includeLinks) {
   return parts.join('\n')
 }
 
-// 搜索走 Bing：DuckDuckGo、Mojeek、Startpage、Brave 在服务器上访问都会给挑战页或 403，
-// 实测只有 Bing 正常返回结果。
-const SEARCH_URL = q => `https://www.bing.com/search?q=${encodeURIComponent(q)}`
-const SEARCH_EXTRACT = `(() => {
-  // 结果链接套了一层跳转，真实地址在 u 参数里：去掉 a1 前缀再 base64 解码
-  const real = raw => {
-    try {
-      let s = String(raw).replace(/^a1/, '').replace(/-/g, '+').replace(/_/g, '/')
-      while (s.length % 4) s += '='
-      const bin = atob(s)
-      const bytes = Uint8Array.from(bin, c => c.charCodeAt(0))
-      return new TextDecoder().decode(bytes)
-    } catch (e) { return null }
-  }
-  const out = []
-  for (const li of document.querySelectorAll('li.b_algo')) {
-    const a = li.querySelector('h2 a')
-    if (!a) continue
-    let href = a.href
-    try {
-      const u = new URL(href, location.href).searchParams.get('u')
-      if (u) { const r = real(u); if (r) href = r }
-    } catch (e) {}
-    if (!/^https?:/i.test(href)) continue
-    // innerText 在无头浏览器里对这些节点会返回空，必须用 textContent
-    const title = (a.textContent || '').trim()
-    if (!title) continue
-    const cap = li.querySelector('.b_caption p') || li.querySelector('p')
-    out.push({ title, href, snippet: cap ? (cap.textContent || '').trim().slice(0, 300) : '' })
-    if (out.length >= 25) break
-  }
-  return out
-})()`
+// 搜索源：Bing 主、DuckDuckGo 兜底，一个没结果就试下一个。
+// 这两家都要求来访者看起来像正常浏览器 —— browser.mjs 里把无头 Chrome 的自报身份
+// 换回普通 Chrome 之后才拿得到结果；在那之前它们只给挑战页。
+// Mojeek、Startpage、Brave 实测仍是 403 或 Captcha，就不放进来了。
+const SEARCH_SOURCES = [
+  {
+    name: 'Bing',
+    url: q => `https://www.bing.com/search?q=${encodeURIComponent(q)}`,
+    extract: `(() => {
+      // 结果链接套了一层跳转，真实地址在 u 参数里：去掉 a1 前缀再 base64 解码
+      const real = raw => {
+        try {
+          let s = String(raw).replace(/^a1/, '').replace(/-/g, '+').replace(/_/g, '/')
+          while (s.length % 4) s += '='
+          const bin = atob(s)
+          return new TextDecoder().decode(Uint8Array.from(bin, c => c.charCodeAt(0)))
+        } catch (e) { return null }
+      }
+      const out = []
+      for (const li of document.querySelectorAll('li.b_algo')) {
+        const a = li.querySelector('h2 a')
+        if (!a) continue
+        let href = a.href
+        try {
+          const u = new URL(href, location.href).searchParams.get('u')
+          if (u) { const r = real(u); if (r) href = r }
+        } catch (e) {}
+        if (!/^https?:/i.test(href)) continue
+        // innerText 在无头浏览器里对这些节点返回空，必须用 textContent
+        const title = (a.textContent || '').trim()
+        if (!title) continue
+        const cap = li.querySelector('.b_caption p') || li.querySelector('p')
+        out.push({ title, href, snippet: cap ? (cap.textContent || '').trim().slice(0, 300) : '' })
+        if (out.length >= 25) break
+      }
+      return out
+    })()`,
+  },
+  {
+    name: 'DuckDuckGo',
+    url: q => `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`,
+    extract: `(() => {
+      const out = []
+      for (const row of document.querySelectorAll('.result, .web-result')) {
+        const a = row.querySelector('a.result__a')
+        if (!a) continue
+        let href = a.href
+        try {
+          // 这边的跳转把真实地址放在 uddg 参数里
+          const u = new URL(href, location.href).searchParams.get('uddg')
+          if (u) href = u
+        } catch (e) {}
+        if (!/^https?:/i.test(href)) continue
+        const title = (a.textContent || '').trim()
+        if (!title) continue
+        const s = row.querySelector('.result__snippet')
+        out.push({ title, href, snippet: s ? (s.textContent || '').trim().slice(0, 300) : '' })
+        if (out.length >= 25) break
+      }
+      return out
+    })()`,
+  },
+]
 
 export function createMcp({ browser, token }) {
   const enc = new TextEncoder()
@@ -159,18 +189,22 @@ export function createMcp({ browser, token }) {
 
     if (name === 'search_web') {
       if (!a.query) return failed('要给一个搜索关键词。')
+      const q = String(a.query)
       const limit = Math.min(Math.max(Number(a.limit) || 8, 1), 20)
-      try {
-        // 搜索结果页本身就是网页，所以复用同一个浏览器，SSRF 那套校验照样生效。
-        const r = await browser.script(SEARCH_URL(String(a.query)), SEARCH_EXTRACT, { allowPrivate: false })
-        const rows = Array.isArray(r.value) ? r.value.slice(0, limit) : []
-        if (!rows.length) {
-          return text(`「${a.query}」没有搜到结果，或者搜索页这次没能正常加载。可以换个说法再试，或者直接用 browse_web 打开某个网址。`)
-        }
-        return text([`「${a.query}」的搜索结果：`, '',
-          rows.map((x, i) => `${i + 1}. ${x.title}\n   ${x.href}${x.snippet ? '\n   ' + x.snippet : ''}`).join('\n\n'),
-        ].join('\n'))
-      } catch (e) { return failed(explain(e)) }
+      let lastErr = null
+      for (const src of SEARCH_SOURCES) {
+        try {
+          // 搜索结果页本身也是网页，所以复用同一个浏览器，那套地址校验照样生效
+          const r = await browser.script(src.url(q), src.extract, { allowPrivate: false })
+          const rows = Array.isArray(r.value) ? r.value.slice(0, limit) : []
+          if (!rows.length) continue
+          return text([`「${q}」的搜索结果（来自 ${src.name}）：`, '',
+            rows.map((x, i) => `${i + 1}. ${x.title}\n   ${x.href}${x.snippet ? '\n   ' + x.snippet : ''}`).join('\n\n'),
+          ].join('\n'))
+        } catch (e) { lastErr = e }
+      }
+      if (lastErr) return failed(explain(lastErr))
+      return text(`「${q}」没有搜到结果。可以换个说法再试，或者直接用 browse_web 打开某个网址。`)
     }
 
     if (name === 'screenshot_web') {
