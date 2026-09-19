@@ -187,6 +187,9 @@ export function createBrowser(opts = {}) {
   let lastError = ''
   let visits = 0
   let realUA = ''
+  // 常驻会话：一个标签页一直开着，翻页、点开、填写都落在同一个页面上。
+  // 无状态的 read/shot/script 仍然各开各的临时标签页，互不干扰。
+  let session = null
 
   // 无头模式的 UA 会自报 HeadlessChrome，不少网站看到就给降级页面甚至直接拦掉。
   // 这里只把它换回同一个版本的普通 Chrome 标识 —— 版本跟着实际浏览器走，
@@ -242,6 +245,7 @@ export function createBrowser(opts = {}) {
     const alive = await adopt()
     if (alive) {
       conn = await Conn.open(alive)
+      session = null
       await captureUA()
       startedAt = Date.now()
       log('PairNest 浏览器：接管了上次留下的 Chrome')
@@ -278,6 +282,7 @@ export function createBrowser(opts = {}) {
     if (typeof process.getuid === 'function' && process.getuid() === 0) args.push('--no-sandbox')
     if (opts.proxy) args.push(`--proxy-server=${opts.proxy}`)
 
+    session = null   // 换了新的浏览器进程，旧会话作废
     proc = spawn(chrome, args, { stdio: 'ignore', detached: false })
     proc.on('exit', () => { proc = null; if (conn) { conn.close(); conn = null } })
 
@@ -300,6 +305,7 @@ export function createBrowser(opts = {}) {
 
   async function close() {
     clearTimeout(idleTimer)
+    session = null
     if (conn) { try { await conn.send('Browser.close') } catch {} conn.close(); conn = null }
     if (proc) { try { proc.kill('SIGTERM') } catch {} proc = null }
     startedAt = 0
@@ -461,6 +467,234 @@ export function createBrowser(opts = {}) {
     }))
   }
 
+  // ——— 常驻会话：一个能停在那里、可以继续往下看的页面 ———
+
+  // 页面此刻显示着什么、有哪些能碰的东西。每个元素给一个编号，后续按编号指认。
+  const PROBE = `(() => {
+    const seen = new Set()
+    const out = []
+    const sel = 'a[href], button, input, textarea, select, [role="button"], [role="link"], [role="tab"], [onclick], [contenteditable="true"]'
+    for (const el of document.querySelectorAll(sel)) {
+      const r = el.getBoundingClientRect()
+      // 只收此刻真的显示在屏幕范围内的
+      if (r.width < 2 || r.height < 2) continue
+      if (r.bottom < 0 || r.top > innerHeight || r.right < 0 || r.left > innerWidth) continue
+      const st = getComputedStyle(el)
+      if (st.visibility === 'hidden' || st.display === 'none' || Number(st.opacity) === 0) continue
+      const tag = el.tagName.toLowerCase()
+      const label = (
+        el.getAttribute('aria-label') || el.placeholder || el.value ||
+        (el.innerText || el.textContent || '').trim() || el.title || el.alt || ''
+      ).replace(/\\s+/g, ' ').trim().slice(0, 70)
+      const key = tag + '|' + label + '|' + Math.round(r.top) + '|' + Math.round(r.left)
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push({
+        i: out.length, tag, type: el.type || '', label,
+        x: Math.round(r.left + r.width / 2),
+        y: Math.round(r.top + r.height / 2),
+      })
+      if (out.length >= 100) break
+    }
+    const pick = document.querySelector('main, article') || document.body
+    return {
+      title: document.title,
+      url: location.href,
+      text: ((pick && pick.innerText) || document.body.innerText || '').replace(/\\n{3,}/g, '\\n\\n').trim(),
+      scrollY: Math.round(scrollY),
+      pageHeight: Math.round(document.documentElement.scrollHeight),
+      viewH: innerHeight,
+      atBottom: scrollY + innerHeight >= document.documentElement.scrollHeight - 40,
+      items: out,
+    }
+  })()`
+
+  async function ensureSession(priv, viewport) {
+    await ensure()
+    if (session && session.conn === conn) { touchIdle(); return session }
+    const { targetId } = await conn.send('Target.createTarget', { url: 'about:blank' })
+    const att = await conn.send('Target.attachToTarget', { targetId, flatten: true })
+    const sid = att.sessionId
+    await conn.send('Page.enable', {}, sid)
+    await conn.send('Runtime.enable', {}, sid)
+    const vw = (viewport && Number(viewport.width)) || 1280
+    const vh = (viewport && Number(viewport.height)) || 800
+    await conn.send('Emulation.setDeviceMetricsOverride',
+      { width: vw, height: vh, deviceScaleFactor: 1, mobile: !!(viewport && viewport.mobile) }, sid)
+    if (realUA) {
+      await conn.send('Emulation.setUserAgentOverride',
+        { userAgent: realUA, acceptLanguage: 'zh-CN,zh;q=0.9,en;q=0.8' }, sid).catch(() => {})
+    }
+    // 会话里跳转到的地址同样要过校验，常驻会话不能成为绕开限制的后门
+    const g = await guard(sid, priv)
+    session = { conn, targetId, sessionId: sid, guard: g, priv, w: vw, h: vh }
+    touchIdle()
+    return session
+  }
+
+  const sEval = async (sid, expression) => {
+    const r = await conn.send('Runtime.evaluate',
+      { expression, returnByValue: true, awaitPromise: true }, sid)
+    if (r.exceptionDetails) throw new Error('page_script_failed')
+    return r.result?.value
+  }
+
+  // 等页面安顿下来：地址不再变、正文长度不再涨，就算稳住了
+  async function settle(sid, ms = 1500) {
+    let last = ''
+    const t0 = Date.now()
+    while (Date.now() - t0 < ms) {
+      await sleep(300)
+      const now = await sEval(sid, `location.href + '|' + document.body.innerText.length`).catch(() => '')
+      if (now && now === last) break
+      last = now
+    }
+  }
+
+  // 在常驻会话里打开一个地址
+  async function sessionOpen(rawUrl, { allowPrivate: ap, viewport } = {}) {
+    const priv = ap === undefined ? allowPrivate : !!ap
+    const verdict = await checkUrl(rawUrl, { allowPrivate: priv })
+    if (!verdict.ok) throw Object.assign(new Error(verdict.why), { statusCode: 400 })
+    return queue(async () => {
+      const s = await ensureSession(priv, viewport)
+      const loaded = new Promise(resolve => {
+        const off = conn.on(m => {
+          if (m.sessionId === s.sessionId && m.method === 'Page.loadEventFired') { off(); resolve(true) }
+        })
+        setTimeout(() => { off(); resolve(false) }, navTimeout)
+      })
+      await conn.send('Page.navigate', { url: verdict.url }, s.sessionId)
+      await loaded
+      await settle(s.sessionId)
+      visits += 1
+      return sEval(s.sessionId, PROBE)
+    })
+  }
+
+  // 当前页此刻的样子，不重新加载
+  async function sessionState() {
+    return queue(async () => {
+      if (!session || session.conn !== conn) throw Object.assign(new Error('no_session'), { statusCode: 400 })
+      touchIdle()
+      return sEval(session.sessionId, PROBE)
+    })
+  }
+
+  // 当前页的画面。给手机看的用 jpeg，体积小很多。
+  async function sessionShot({ format = 'jpeg', quality = 60 } = {}) {
+    return queue(async () => {
+      if (!session || session.conn !== conn) throw Object.assign(new Error('no_session'), { statusCode: 400 })
+      touchIdle()
+      const params = { format }
+      if (format === 'jpeg') params.quality = Math.min(Math.max(Number(quality) || 60, 20), 95)
+      const r = await conn.send('Page.captureScreenshot', params, session.sessionId)
+      // 报的是页面自己的坐标系（CSS 像素），不是截图的物理尺寸：
+      // 手机仿真下没写 viewport meta 的页面会被整体缩放，两者不相等，
+      // 拿物理尺寸去换算点击位置就会点偏。
+      const vp = await sEval(session.sessionId, '({ w: innerWidth, h: innerHeight })')
+        .catch(() => ({ w: session.w, h: session.h }))
+      return {
+        buf: Buffer.from(r.data, 'base64'), format,
+        w: (vp && vp.w) || session.w,
+        h: (vp && vp.h) || session.h,
+      }
+    })
+  }
+
+  // 在当前页上做一件事，做完回报页面的新样子。
+  // 这些都是普通浏览器里人手就能做的动作：往下看、点开一条、在框里填字、回上一页。
+  async function sessionAct(act = {}) {
+    return queue(async () => {
+      if (!session || session.conn !== conn) throw Object.assign(new Error('no_session'), { statusCode: 400 })
+      const sid = session.sessionId
+      const kind = String(act.type || '')
+
+      // 按编号找到那个元素此刻在屏幕上的位置
+      const pointAt = async index => {
+        const st = await sEval(sid, PROBE)
+        const it = (st.items || [])[Number(index)]
+        if (!it) throw Object.assign(new Error('no_such_item'), { statusCode: 400 })
+        return it
+      }
+      const tap = async (x, y) => {
+        for (const type of ['mousePressed', 'mouseReleased']) {
+          await conn.send('Input.dispatchMouseEvent',
+            { type, x, y, button: 'left', clickCount: 1, pointerType: 'mouse' }, sid)
+        }
+      }
+
+      if (kind === 'scroll') {
+        // 先用真实的滚轮事件，那些自己接管了滚动的页面才会响应
+        const dy = Number(act.dy ?? Math.round(session.h * 0.8))
+        const before = await sEval(sid, 'Math.round(scrollY)')
+        await conn.send('Input.dispatchMouseEvent', {
+          type: 'mouseWheel', x: Math.round(session.w / 2), y: Math.round(session.h / 2),
+          deltaX: 0, deltaY: dy, pointerType: 'mouse',
+        }, sid)
+        await sleep(700)
+        // 手机尺寸的窗口里滚轮常常不被理会，没动就直接滚
+        const after = await sEval(sid, 'Math.round(scrollY)')
+        if (after === before) {
+          await sEval(sid, `scrollBy({ top: ${dy}, behavior: 'instant' })`)
+          await sleep(500)
+        }
+        await sleep(400)          // 等惰性加载的内容补上来
+      } else if (kind === 'click') {
+        const it = (act.x !== undefined && act.y !== undefined)
+          ? { x: Math.round(act.x), y: Math.round(act.y) }
+          : await pointAt(act.index)
+        await tap(it.x, it.y)
+        await settle(sid, 2500)
+      } else if (kind === 'type') {
+        if (act.index !== undefined) { const it = await pointAt(act.index); await tap(it.x, it.y); await sleep(250) }
+        if (act.clear) {
+          await sEval(sid, `(() => { const el = document.activeElement
+            if (el && ('value' in el)) { el.value = ''
+              el.dispatchEvent(new Event('input', { bubbles: true })) } })()`)
+        }
+        await conn.send('Input.insertText', { text: String(act.text || '') }, sid)
+        await sleep(300)
+      } else if (kind === 'key') {
+        const KEYS = {
+          Enter: { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\\r' },
+          Escape: { key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 },
+          Tab: { key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 },
+          Backspace: { key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 },
+          ArrowDown: { key: 'ArrowDown', code: 'ArrowDown', windowsVirtualKeyCode: 40 },
+          ArrowUp: { key: 'ArrowUp', code: 'ArrowUp', windowsVirtualKeyCode: 38 },
+        }
+        const k = KEYS[String(act.key)]
+        if (!k) throw Object.assign(new Error('unsupported_key'), { statusCode: 400 })
+        await conn.send('Input.dispatchKeyEvent', { type: 'keyDown', ...k }, sid)
+        await conn.send('Input.dispatchKeyEvent', { type: 'keyUp', ...k }, sid)
+        await settle(sid, 2500)
+      } else if (kind === 'back') {
+        await sEval(sid, 'history.back()')
+        await settle(sid, 2500)
+      } else if (kind === 'reload') {
+        await conn.send('Page.reload', {}, sid)
+        await sleep(1500)
+        await settle(sid)
+      } else {
+        throw Object.assign(new Error('unknown_action'), { statusCode: 400 })
+      }
+
+      touchIdle()
+      return sEval(sid, PROBE)
+    })
+  }
+
+  async function sessionClose() {
+    if (!session) return { ok: true }
+    const s = session
+    session = null
+    try { s.guard.off() } catch {}
+    try { await conn.send('Fetch.disable', {}, s.sessionId) } catch {}
+    try { await conn.send('Target.closeTarget', { targetId: s.targetId }) } catch {}
+    return { ok: true }
+  }
+
   const status = () => ({
     chrome: findChrome(),
     available: !!findChrome(),
@@ -472,5 +706,7 @@ export function createBrowser(opts = {}) {
     lastError,
   })
 
-  return { read, shot, script, status, close }
+  return { read, shot, script, status, close,
+    sessionOpen, sessionState, sessionAct, sessionShot, sessionClose,
+    hasSession: () => !!(session && session.conn === conn) }
 }

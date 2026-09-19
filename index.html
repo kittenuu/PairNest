@@ -709,6 +709,35 @@
   }
   .webshot img{width:100%;border-radius:12px;border:2px solid var(--line);display:block}
   .weberr{color:#c84f70;font-size:13px;line-height:1.7}
+  /* 进去逛：看着画面自己点 */
+  .livewrap{
+    position:relative;background:#fffdfd;border:2px solid var(--line);
+    border-radius:16px;overflow:hidden;min-height:220px
+  }
+  .livewrap img{width:100%;display:block;cursor:crosshair}
+  .livewrap .hint{
+    position:absolute;inset:0;display:grid;place-items:center;
+    font-size:13px;color:var(--sub);text-align:center;padding:24px;line-height:1.8
+  }
+  .livetap{
+    position:absolute;width:26px;height:26px;margin:-13px 0 0 -13px;border-radius:50%;
+    border:2px solid var(--pink-d);pointer-events:none;animation:livetap .5s ease-out forwards
+  }
+  @keyframes livetap{from{transform:scale(.4);opacity:1}to{transform:scale(1.6);opacity:0}}
+  .livebar{display:flex;gap:6px;margin-top:10px;flex-wrap:wrap}
+  .livebar button{
+    flex:1;min-width:64px;font:inherit;font-size:13px;font-weight:700;padding:11px 6px;
+    border:2px solid var(--line);border-radius:13px;background:var(--card);color:#8d5560;cursor:pointer
+  }
+  .livebar button:active{transform:translateY(2px)}
+  .livebar button.on{background:var(--pink-d);color:#fff;border-color:var(--pink-d)}
+  .livebar button:disabled{opacity:.45}
+  .livetype{display:flex;gap:6px;margin-top:8px}
+  .livetype input{
+    flex:1;min-width:0;font:inherit;font-size:14px;padding:10px 12px;
+    border:2px solid var(--line);border-radius:13px;background:var(--card);color:var(--ink);outline:none
+  }
+  .livenote{font-size:11.5px;color:var(--sub);line-height:1.7;margin-top:10px}
   .stile{text-align:center;font-size:13px;cursor:pointer}
   .stile div:first-child{
     width:74px;height:70px;margin:0 auto 6px;
@@ -1058,9 +1087,10 @@ function open_(p){
   if(p==='memo') setTimeout(loadMemos,10);
   if(p==='handoff') setTimeout(loadHandoff,10);
   if(p==='web') setTimeout(initWeb,10);
+  if(p==='live') setTimeout(initLive,10);
   const T = {game:'小游戏', memory:'恋爱记忆', loc:'定位', us:'小档案',
              keys:'密钥本', diary:'心情日记', quotes:'原话', mcp:'接过的 MCP', handoff:'窗口交接',
-             anniv:'纪念日', period:'经期记录', mood:'今天心情', memo:'长期记忆', web:'小窗',
+             anniv:'纪念日', period:'经期记录', mood:'今天心情', memo:'长期记忆', web:'小窗', live:'进去逛逛',
              annivnew:'纪念日', pdset:'经期设置', pdhelp:'经期说明', pet:'云养宠'};
   $('ptitle').textContent = T[p];
   $('pbody').innerHTML = render(p);
@@ -1718,7 +1748,37 @@ function render(p){
              spellcheck="false" placeholder="https://…">
       <button id="webGo">看看</button>
     </div>
+    <div class="webact" style="margin-top:0">
+      <button class="ghost" data-go="live" style="flex:1">进去逛逛（看得见画面，能点能打字）</button>
+    </div>
     <div id="webOut"></div>`;
+
+  if(p==='live') return `<div class="foot" style="margin-top:0">看着画面，自己点</div>
+    <div class="webbar">
+      <input id="lvUrl" type="url" inputmode="url" autocomplete="off" autocapitalize="off"
+             spellcheck="false" placeholder="https://…">
+      <button id="lvGo">进去</button>
+    </div>
+    <div class="livewrap" id="lvWrap">
+      <div class="hint" id="lvHint">输一个网址进去，<br>然后这里就能看见它，点哪儿是哪儿。</div>
+    </div>
+    <div class="livebar">
+      <button id="lvUp">↑ 上翻</button>
+      <button id="lvDown">↓ 下翻</button>
+      <button id="lvBack">‹ 返回</button>
+      <button id="lvReload">⟳ 刷新</button>
+      <button id="lvLive" class="on">● 实时</button>
+      <button id="lvOff">✕ 关掉</button>
+    </div>
+    <div class="livetype">
+      <input id="lvText" placeholder="先点一下输入框，再在这里打字">
+      <button id="lvSend" style="font:inherit;font-size:13.5px;font-weight:700;padding:10px 14px;border:0;border-radius:13px;background:var(--pink-d);color:#fff">填进去</button>
+    </div>
+    <div class="livenote" id="lvNote">
+      要登录的话：在这里把网站打开，扫码和密码都你自己来。<br>
+      登录一次就长期留着，之后爸爸就能进去看了。<br>
+      <b style="color:#c84f70">别登支付类、银行类的账号。</b>
+    </div>`;
 
   {
     const born=CAT_BORN;
@@ -2178,6 +2238,133 @@ function initWeb(){
     if(e.target.closest('#webShot')) webShot();
     else if(e.target.closest('#webOff')) webOff();
   };
+}
+
+// ——— 进去逛：把服务器上那个浏览器的画面搬到手机上，点哪儿是哪儿 ———
+// 用手机尺寸开窗，画面按比例缩放显示，点击时再换算回网页里的真实坐标。
+let lvTimer=null, lvW=390, lvH=844, lvBusy=false, lvOn=true, lvImgUrl=null;
+
+function lvSetImg(blob){
+  const wrap=$('lvWrap'); if(!wrap) return;
+  const old=lvImgUrl;
+  lvImgUrl=URL.createObjectURL(blob);
+  let img=wrap.querySelector('img');
+  if(!img){
+    wrap.innerHTML='';
+    img=document.createElement('img');
+    img.alt='网页画面';
+    wrap.appendChild(img);
+    img.addEventListener('click', lvTap);
+  }
+  img.src=lvImgUrl;
+  if(old) setTimeout(()=>URL.revokeObjectURL(old), 400);
+}
+
+async function lvShot(){
+  if(lvBusy) return;
+  try{
+    const r=await fetch('/api/browser/session/shot?q=55',{cache:'no-store'});
+    if(!r.ok) return;
+    const size=(r.headers.get('X-View-Size')||'').split('x');
+    if(size.length===2){ lvW=+size[0]||lvW; lvH=+size[1]||lvH; }
+    lvSetImg(await r.blob());
+  }catch(e){}
+}
+
+// 点画面上的某一点 = 点网页里对应的那一点
+async function lvTap(e){
+  const img=e.currentTarget, r=img.getBoundingClientRect();
+  const x=Math.round((e.clientX-r.left)/r.width*lvW);
+  const y=Math.round((e.clientY-r.top)/r.height*lvH);
+  const dot=document.createElement('div');
+  dot.className='livetap';
+  dot.style.left=(e.clientX-r.left)+'px'; dot.style.top=(e.clientY-r.top)+'px';
+  img.parentNode.appendChild(dot);
+  setTimeout(()=>dot.remove(),500);
+  await lvAct({type:'click', x, y});
+}
+
+async function lvAct(act){
+  if(lvBusy) return;
+  lvBusy=true;
+  try{
+    const r=await fetch('/api/browser/session/act',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify(act)});
+    const d=await r.json();
+    const note=$('lvNote');
+    if(!r.ok||d.error){
+      if(note) note.innerHTML='<span class="weberr">'+webEsc(d.error==='no_session'?'还没打开页面呢。':d.error)+'</span>';
+    }else if(note && d.url){
+      note.innerHTML='正在看：'+webEsc(String(d.title||'').slice(0,40))+'<br>'
+        +'<span style="word-break:break-all">'+webEsc(d.url)+'</span>';
+    }
+  }catch(e){}
+  finally{ lvBusy=false; lvShot(); }
+}
+
+async function lvOpen(){
+  const inp=$('lvUrl'); let u=(inp.value||'').trim();
+  if(!u) return;
+  if(!/^https?:\/\//i.test(u)){ u='https://'+u; inp.value=u; }
+  const hint=$('lvHint'); if(hint) hint.textContent='正在打开，第一次要等浏览器起来…';
+  lvBusy=true;
+  try{
+    const r=await fetch('/api/browser/session/open',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({url:u, viewport:{width:390,height:844,mobile:true}})});
+    const d=await r.json();
+    if(!r.ok||d.error){
+      const w=$('lvWrap');
+      if(w) w.innerHTML='<div class="hint weberr">'+webEsc(
+        d.error==='address_not_allowed'?'这个地址指向内网，被挡下了。':
+        d.error==='chrome_not_found'?'服务器上没装 Chrome。':(d.error||'打不开'))+'</div>';
+      return;
+    }
+    const note=$('lvNote');
+    if(note) note.innerHTML='正在看：'+webEsc(String(d.title||'').slice(0,40));
+  }catch(e){}
+  finally{ lvBusy=false; lvShot(); }
+}
+
+function initLive(){
+  lvOn=true; lvBusy=false;
+  const go=$('lvGo'), inp=$('lvUrl');
+  if(go) go.onclick=lvOpen;
+  if(inp) inp.onkeydown=e=>{ if(e.key==='Enter'){ e.preventDefault(); inp.blur(); lvOpen(); } };
+  const on=(id,fn)=>{ const el=$(id); if(el) el.onclick=fn; };
+  on('lvDown', ()=>lvAct({type:'scroll'}));
+  on('lvUp',   ()=>lvAct({type:'scroll', dy:-700}));
+  on('lvBack', ()=>lvAct({type:'back'}));
+  on('lvReload',()=>lvAct({type:'reload'}));
+  on('lvSend', async ()=>{
+    const t=$('lvText'); if(!t||!t.value) return;
+    await lvAct({type:'type', text:t.value});
+    t.value='';
+  });
+  on('lvLive', ()=>{
+    lvOn=!lvOn;
+    const b=$('lvLive');
+    if(b){ b.classList.toggle('on', lvOn); b.textContent=lvOn?'● 实时':'○ 暂停'; }
+  });
+  on('lvOff', async ()=>{
+    try{ await fetch('/api/browser/session/close',{method:'POST'}); }catch(e){}
+    const w=$('lvWrap');
+    if(w) w.innerHTML='<div class="hint">已经关掉了。<br>登录状态还留着，下次进来还在。</div>';
+  });
+  const tt=$('lvText');
+  if(tt) tt.onkeydown=async e=>{
+    if(e.key==='Enter'){ e.preventDefault(); tt.blur();
+      if(tt.value){ await lvAct({type:'type', text:tt.value}); tt.value=''; }
+      await lvAct({type:'key', key:'Enter'});
+    }
+  };
+  // 已经有开着的页面就直接把画面接上
+  fetch('/api/browser').then(r=>r.json()).then(d=>{ if(d && d.session) lvShot(); }).catch(()=>{});
+  clearInterval(lvTimer);
+  lvTimer=setInterval(()=>{
+    if(curPage!=='live'){ clearInterval(lvTimer); lvTimer=null; return; }
+    if(lvOn && !lvBusy) lvShot();
+  }, 1800);
 }
 
 async function loadHandoff(){

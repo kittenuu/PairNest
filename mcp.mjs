@@ -55,6 +55,73 @@ const TOOLS = [
     },
   },
   {
+    name: 'page_open',
+    title: '在常驻页面里打开',
+    description:
+      '在一个会一直停在那里的页面里打开网址，之后可以继续往下翻、点开某一条、在框里填字。'
+      + '要连着看同一个网站（刷时间线、翻列表、进到详情页）就用这个；只想读一篇文章用 browse_web 更省事。'
+      + '返回页面的文字，以及此刻屏幕上能操作的东西（每个带一个编号，后面按编号指认）。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: '要打开的网址，必须是 http 或 https 开头' },
+        mobile: { type: 'boolean', description: '用手机尺寸的窗口打开，默认 false（桌面尺寸）' },
+      },
+      required: ['url'],
+    },
+  },
+  {
+    name: 'page_look',
+    title: '看看现在这一页',
+    description:
+      '返回常驻页面此刻的样子：标题、网址、正文、能操作的元素、滚到了哪里、到底了没有。'
+      + '不会重新加载，纯粹是看一眼现在屏幕上有什么。',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'page_do',
+    title: '在这一页上做点什么',
+    description:
+      '在常驻页面上做一个动作，做完返回页面的新样子。动作有：'
+      + 'scroll（往下翻一屏，dy 给负数就是往回翻）、'
+      + 'click（点某个元素，index 用 page_look 给的编号）、'
+      + 'type（在某个输入框里填字）、'
+      + 'key（按 Enter / Escape / Tab / Backspace / 方向键）、'
+      + 'back（回上一页）、reload（重新加载）。'
+      + '刷一个列表就是反复 scroll；想看某一条就 click 它的编号，看完 back 回来。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        type: {
+          type: 'string',
+          enum: ['scroll', 'click', 'type', 'key', 'back', 'reload'],
+          description: '要做的动作',
+        },
+        index: { type: 'number', description: 'click / type 用：page_look 里那个元素的编号' },
+        text: { type: 'string', description: 'type 用：要填进去的文字' },
+        clear: { type: 'boolean', description: 'type 用：先清空原有内容，默认 false' },
+        key: { type: 'string', description: 'key 用：Enter、Escape、Tab、Backspace、ArrowDown、ArrowUp' },
+        dy: { type: 'number', description: 'scroll 用：翻多少像素，负数往回翻，默认往下一屏' },
+      },
+      required: ['type'],
+    },
+  },
+  {
+    name: 'page_shot',
+    title: '给这一页拍照',
+    description:
+      '把常驻页面此刻的画面截下来。'
+      + '文字读不到内容、或者想亲眼看看排版和图片的时候用它 —— 比如视频网站的列表页，'
+      + '标题和封面是看得见的，但文字提取往往拿不到。',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'page_done',
+    title: '关掉常驻页面',
+    description: '不看了就关掉它，省下服务器的内存。登录状态不会丢，下次打开还在。',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
     name: 'screenshot_web',
     title: '给网页拍照',
     description:
@@ -80,8 +147,30 @@ const WHY = {
   invalid_url: '这个网址不合法。',
   chrome_not_found: '小屋的服务器上没有安装 Chrome，浏览器起不来。',
   url_required: '要给一个网址。',
+  no_session: '现在没有开着的页面，先用 page_open 打开一个。',
+  no_such_item: '这一屏上没有这个编号的东西，先 page_look 看一眼现在有什么。',
+  unknown_action: '不认识这个动作。',
+  unsupported_key: '这个按键不支持。',
 }
 const explain = e => WHY[e && e.message] || `打开失败：${(e && e.message) || e}`
+
+// 把常驻页面此刻的状态整理成一段能读的话。
+function stateToText(st, { maxChars = 6000 } = {}) {
+  const head = [
+    `标题：${st.title || '（无）'}`,
+    `网址：${st.url}`,
+    `位置：${st.scrollY} / ${st.pageHeight}${st.atBottom ? '（已经到底了）' : ''}`,
+  ].join('\n')
+  const body = st.text
+    ? (st.text.length > maxChars ? st.text.slice(0, maxChars) + '\n……（还有，往下翻）' : st.text)
+    : '（这一页没读到文字。很多视频站、图片站就是这样，用 page_shot 看画面反而看得见。）'
+  const items = (st.items || [])
+    .map(i => `  [${i.i}] ${i.tag}${i.type ? ':' + i.type : ''} ${i.label || '（没有文字）'}`)
+    .join('\n')
+  return [head, '', body, '',
+    `这一屏能操作的（${(st.items || []).length} 个，按编号指认）：`,
+    items || '  （没有）'].join('\n')
+}
 
 // 把一次浏览结果整理成适合阅读的纯文本。
 function pageToText(r, includeLinks) {
@@ -205,6 +294,50 @@ export function createMcp({ browser, token }) {
       }
       if (lastErr) return failed(explain(lastErr))
       return text(`「${q}」没有搜到结果。可以换个说法再试，或者直接用 browse_web 打开某个网址。`)
+    }
+
+    if (name === 'page_open') {
+      if (!a.url) return failed(WHY.url_required)
+      try {
+        const st = await browser.sessionOpen(String(a.url), {
+          allowPrivate: false,
+          viewport: a.mobile ? { width: 390, height: 844, mobile: true } : { width: 1280, height: 800 },
+        })
+        return text(stateToText(st))
+      } catch (e) { return failed(explain(e)) }
+    }
+
+    if (name === 'page_look') {
+      try { return text(stateToText(await browser.sessionState())) }
+      catch (e) { return failed(explain(e)) }
+    }
+
+    if (name === 'page_do') {
+      if (!a.type) return failed('要说做什么动作。')
+      try {
+        const st = await browser.sessionAct({
+          type: String(a.type),
+          index: a.index, text: a.text, clear: a.clear, key: a.key, dy: a.dy,
+        })
+        return text(stateToText(st))
+      } catch (e) { return failed(explain(e)) }
+    }
+
+    if (name === 'page_shot') {
+      try {
+        const r = await browser.sessionShot({ format: 'png' })
+        return {
+          content: [
+            { type: 'text', text: '常驻页面此刻的画面' },
+            { type: 'image', data: r.buf.toString('base64'), mimeType: 'image/png' },
+          ],
+        }
+      } catch (e) { return failed(explain(e)) }
+    }
+
+    if (name === 'page_done') {
+      try { await browser.sessionClose(); return text('已经关掉了。登录状态还留着，下次打开还在。') }
+      catch (e) { return failed(explain(e)) }
     }
 
     if (name === 'screenshot_web') {

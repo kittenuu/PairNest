@@ -837,7 +837,11 @@ const server = createServer(async (req, res) => {
       if (!FEATURES.browser) return J(res, { error: 'browser_disabled' }, 404)
 
       if (p === '/api/browser' && req.method === 'GET') {
-        return J(res, { ...BROWSER.status(), allowScript: !!BROWSER_CFG.allowScript })
+        return J(res, {
+          ...BROWSER.status(),
+          allowScript: !!BROWSER_CFG.allowScript,
+          session: BROWSER.hasSession(),
+        })
       }
       if (p === '/api/browser/read' && req.method === 'POST') {
         const { url } = await readJson(req)
@@ -862,6 +866,36 @@ const server = createServer(async (req, res) => {
         if (!url || !expression) badRequest('url_and_expression_required')
         return J(res, await BROWSER.script(String(url), String(expression)))
       }
+      // 常驻会话：一个停在那里的页面，可以继续翻、继续点。
+      // 登录这类事就靠它 —— 扫码由人自己来，登录态留在浏览器的资料目录里。
+      if (p === '/api/browser/session/open' && req.method === 'POST') {
+        const body = await readJson(req)
+        if (!body.url) badRequest('url_required')
+        return J(res, await BROWSER.sessionOpen(String(body.url), { viewport: body.viewport }))
+      }
+      if (p === '/api/browser/session/state' && req.method === 'GET') {
+        return J(res, await BROWSER.sessionState())
+      }
+      if (p === '/api/browser/session/act' && req.method === 'POST') {
+        return J(res, await BROWSER.sessionAct(await readJson(req)))
+      }
+      if (p === '/api/browser/session/shot' && req.method === 'GET') {
+        const out = await BROWSER.sessionShot({
+          format: url.searchParams.get('format') === 'png' ? 'png' : 'jpeg',
+          quality: Number(url.searchParams.get('q')) || 60,
+        })
+        securityHeaders(res)
+        res.writeHead(200, {
+          'Content-Type': out.format === 'png' ? 'image/png' : 'image/jpeg',
+          'Cache-Control': 'no-store',
+          'X-View-Size': `${out.w}x${out.h}`,
+        })
+        return res.end(out.buf)
+      }
+      if (p === '/api/browser/session/close' && req.method === 'POST') {
+        return J(res, await BROWSER.sessionClose())
+      }
+
       if (p === '/api/browser/close' && req.method === 'POST') {
         await BROWSER.close()
         return J(res, { ok: true })
