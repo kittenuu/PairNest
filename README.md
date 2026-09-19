@@ -16,6 +16,8 @@ PairNest 不绑定或推荐具体云平台。每位使用者需要自行选择�
 - 一个可写且不会在重启、休眠或重新部署时被清空的持久目录；
 - 可配置环境变量与健康检查的能力。
 
+如果要开「小窗」（让 PairNest 自己去看网页），部署环境还需要能执行的 Chrome/Chromium 和 1GB 以上内存，详见后面单独一节。
+
 建议的服务配置：
 
 ```text
@@ -65,7 +67,8 @@ node server.mjs
 - `auth.apiToken`：给自己的 MCP、脚本或 AI 调用 API 使用，不要放进前端代码。
 - `startDate`：在一起的第一天。
 - `parents`：档案卡中的名字和称呼。
-- `features`：定位、密钥本、长期记忆与交接页开关，默认全关。
+- `features`：定位、密钥本、长期记忆、交接页与小窗开关，默认全关。
+- `browser`：小窗（服务端浏览器）的细项开关，见下面单独一节。
 - `myPlace`：定位页“我在哪”的显示名和坐标。
 
 也可以用环境变量覆盖监听地址、状态目录与三个鉴权值：
@@ -107,7 +110,107 @@ pairnest.example.com {
 - `fonts/` 中的字体；
 - `data/uploads/` 中由应用上传的纪念日背景。
 
-`server.mjs`、`.git/`、`config.json` 和其余 `data/` 内容不会通过静态 URL 返回。
+`server.mjs`、`browser.mjs`、`.git/`、`config.json` 和其余 `data/` 内容不会通过静态 URL 返回。
+
+## 小窗：让 PairNest 自己去看网页
+
+开启后，PairNest 会在服务器上启动一个无界面的 Chrome，用 Chrome 调试协议（CDP）真的打开网页，
+再把结果交给页面或 API。拿回来的是**脚本执行完之后**的内容，不是一段静态 HTML，所以那些靠 JS
+渲染的页面也读得到。这部分没有引入任何 npm 依赖：Node 自带 WebSocket 和 fetch，CDP 本身就是
+WebSocket + JSON。
+
+手机上进「恋爱记忆 → 小窗」，输网址就能看；`config.json` 里没打开时，这个入口不会出现。
+
+### 打开它
+
+```json
+{
+  "features": { "browser": true },
+  "browser": { "allowPrivate": false, "allowScript": false, "idleMinutes": 5 }
+}
+```
+
+- `features.browser`：总开关，默认关。关着时全部 `/api/browser*` 一律 404。
+- `browser.allowPrivate`：**默认关，除非你清楚自己在做什么，否则别开**。见下面的安全说明。
+- `browser.allowScript`：是否允许 `/api/browser/script` 在页面里跑任意 JS，默认关。
+- `browser.idleMinutes`：闲置多久自动关掉浏览器省内存，默认 5 分钟。
+
+浏览器是懒启动的：没人用就不占内存，用的时候才起，闲置超时自己关。服务收到 `SIGINT`/`SIGTERM`
+时也会把它一起带走。如果服务是被强杀的（平台重启、OOM），下次启动会接管上次留下的那个 Chrome，
+而不是再起一个。
+
+### 部署环境的额外要求
+
+- 一个能执行的 Chrome / Chromium；
+- 内存建议 **1GB 以上**。Chrome 本身通常要 300MB 起，512MB 的免费实例跑不动；
+- 程序会按顺序找：`PAIRNEST_CHROME` 环境变量 → `PLAYWRIGHT_BROWSERS_PATH` 下的 chromium →
+  `/usr/bin/chromium` 等常见路径 → macOS 的 Chrome.app。找不到就只是这个功能失效，不影响小屋其他部分。
+
+Debian/Ubuntu 装一个：
+
+```bash
+apt-get update && apt-get install -y chromium
+```
+
+用 Docker 部署时，镜像里要自带 Chromium，例如：
+
+```dockerfile
+FROM node:20-slim
+RUN apt-get update && apt-get install -y --no-install-recommends       chromium ca-certificates fonts-noto-cjk     && rm -rf /var/lib/apt/lists/*
+ENV PAIRNEST_CHROME=/usr/bin/chromium
+WORKDIR /app
+COPY . .
+CMD ["node", "server.mjs"]
+```
+
+装了中文字体截图里才不会是一片方块。
+
+### 登录态
+
+浏览器的用户资料存在 `PAIRNEST_STATE_DIR/data/browser-profile/`，挂了持久盘就能长期保留。
+这个目录已经在 `.gitignore` 里——**里面有 Cookie，等同于凭据，不要提交、不要打包发人**。
+
+### API
+
+都要鉴权（登录 Cookie 或 `Authorization: Bearer <apiToken>`）：
+
+```bash
+# 读一个网页：标题、正文、链接
+curl -H "Authorization: Bearer 你的Token" -H 'Content-Type: application/json' \
+  -d '{"url":"https://example.com"}' https://你的域名/api/browser/read
+
+# 给网页拍张照，直接返回 PNG
+curl -H "Authorization: Bearer 你的Token" -H 'Content-Type: application/json' \
+  -d '{"url":"https://example.com"}' https://你的域名/api/browser/shot -o shot.png
+
+# 看状态 / 主动关掉省内存
+curl -H "Authorization: Bearer 你的Token" https://你的域名/api/browser
+curl -X POST -H "Authorization: Bearer 你的Token" https://你的域名/api/browser/close
+```
+
+`/api/browser/script` 需要 `allowScript` 打开，请求体是 `{"url":"…","expression":"…"}`。
+
+### 安全说明，认真读
+
+一个跑在服务器上的浏览器，和跑在自己电脑上的浏览器风险完全不同：它能访问的是**服务器的网络位置**。
+如果被诱导去访问内网地址或云平台的元数据服务（`169.254.169.254`），等于把整台机器交出去。
+所以这里做了两层拦截：
+
+1. 导航之前先解析目标域名，任何解析结果落在环回、私网、链路本地、运营商级 NAT 或组播地址的一律拒绝；
+2. 页面发出的每一个请求都会被拦下来单独校验，重定向和子资源同样过一遍。
+
+**残余风险要说清楚**：域名可以在「校验」和「Chrome 自己解析」这两次之间改变指向
+（DNS rebinding）。第 2 层能挡住绝大多数实际情况，但不能把这个窗口完全关死。因此：
+
+- 这个功能默认关闭，需要你自己判断能不能接受这点风险再开；
+- **`allowPrivate` 会把上面两层防护整个关掉**，只在「PairNest 就跑在自己电脑上、你想让它看本机页面」
+  这种情形下才开，公网部署的实例永远不要开；
+- `allowScript` 允许在页面里执行任意 JS，能力很深，不需要就别开；
+- 调试端口只监听 `127.0.0.1` 且由系统随机分配，不会对外暴露；
+- 小窗读回来的内容全部当作不可信数据处理：文字转义后再显示，链接只认 `http(s)`。
+
+另外，和本机玩法一样的那几条仍然成立：**只在这个浏览器里登录内容类账号，支付类、银行类账号永远不要登**；
+扫码、密码、验证码这些始终自己动手。
 
 ## 高德地图 Key：每个使用者必须自己申请
 
@@ -126,6 +229,7 @@ Key 的额度、白名单、账单与定位数据都属于申请者自己的账�
 - 浏览器提交定位后，精确坐标会先发到你自己的 PairNest 服务器。
 - 配置高德时，服务器会把坐标发送给高德做坐标转换和地名反查；未配置高德时会发送给 OpenStreetMap Nominatim。
 - 只有从 Telegram WebApp 启动时，页面才加载 Telegram 的 WebApp 脚本；普通浏览器不再固定请求该脚本。
+- 开启小窗后，你让它打开的网址会由服务器上的浏览器去访问，对方网站看到的是服务器的 IP；浏览器的 Cookie 存在 `data/browser-profile/`。
 - 登录 Cookie 使用 `HttpOnly` 与 `SameSite=Strict`；经 HTTPS 反代时还会带 `Secure`。
 
 因此“数据在本地”是指 PairNest 不把数据集中上传给项目作者，不代表开启定位后完全不与地图服务通信。

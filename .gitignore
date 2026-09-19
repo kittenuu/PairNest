@@ -2,6 +2,7 @@ config.json
 data/*.json
 data/memories/
 data/uploads/
+data/browser-profile/
 data/handoff.md
 data/keyring.md
 data/keypw.txt

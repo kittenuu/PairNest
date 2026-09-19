@@ -5,6 +5,7 @@ import { readFile, writeFile, readdir, mkdir, chmod } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { join, dirname, extname, resolve, sep, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createBrowser } from './browser.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 // 云平台可以把持久磁盘挂载到独立目录；本机运行时仍默认写在项目目录。
@@ -67,9 +68,22 @@ if (!Number.isInteger(PORT_CFG) || PORT_CFG < 1 || PORT_CFG > 65535) {
   throw new Error(`无效端口：${process.env.PORT || CFG.port}`)
 }
 const FEATURES = Object.assign(
-  { location: false, keyring: false, memories: false, handoff: false },
+  { location: false, keyring: false, memories: false, handoff: false, browser: false },
   CFG.features || {},
 )
+
+// 服务端浏览器：默认不开。开了也只提供读页面和截图，跑 JS 要再单独开一道。
+const BROWSER_CFG = Object.assign(
+  { allowPrivate: false, allowScript: false, idleMinutes: 5 },
+  CFG.browser || {},
+)
+const BROWSER = createBrowser({
+  stateDir: STATE_DIR,
+  allowPrivate: !!BROWSER_CFG.allowPrivate,
+  idleMs: Math.max(1, Number(BROWSER_CFG.idleMinutes) || 5) * 60 * 1000,
+  proxy: process.env.PAIRNEST_BROWSER_PROXY || BROWSER_CFG.proxy || '',
+  log: msg => console.log(msg),
+})
 
 // 高德地图：不填就退回免费的 Nominatim 反查，只是没有地图底图
 const AMAP = CFG.amap || null
@@ -423,6 +437,7 @@ const server = createServer(async (req, res) => {
           ? { key: AMAP.web_js.key, sec: AMAP.web_js.security_code } : null,
         startDate: START,
         myPlace: CFG.myPlace || null,
+        features: FEATURES,
       })
     }
 
@@ -797,6 +812,44 @@ const server = createServer(async (req, res) => {
       return J(res, { ok: true })
     }
 
+    // ——— 服务端浏览器 ———
+    // 用 Chrome 调试协议真的去打开网页，拿到的是脚本跑完之后的样子，不是一段死 HTML。
+    if (p === '/api/browser' || p.startsWith('/api/browser/')) {
+      if (!FEATURES.browser) return J(res, { error: 'browser_disabled' }, 404)
+
+      if (p === '/api/browser' && req.method === 'GET') {
+        return J(res, { ...BROWSER.status(), allowScript: !!BROWSER_CFG.allowScript })
+      }
+      if (p === '/api/browser/read' && req.method === 'POST') {
+        const { url } = await readJson(req)
+        if (!url) badRequest('url_required')
+        return J(res, await BROWSER.read(String(url)))
+      }
+      if (p === '/api/browser/shot' && req.method === 'POST') {
+        const body = await readJson(req)
+        if (!body.url) badRequest('url_required')
+        const out = await BROWSER.shot(String(body.url), { fullPage: !!body.fullPage })
+        securityHeaders(res)
+        res.writeHead(200, {
+          'Content-Type': 'image/png',
+          'Cache-Control': 'no-store',
+          'X-Page-Title': encodeURIComponent(out.title),
+        })
+        return res.end(out.png)
+      }
+      if (p === '/api/browser/script' && req.method === 'POST') {
+        if (!BROWSER_CFG.allowScript) return J(res, { error: 'script_disabled' }, 403)
+        const { url, expression } = await readJson(req)
+        if (!url || !expression) badRequest('url_and_expression_required')
+        return J(res, await BROWSER.script(String(url), String(expression)))
+      }
+      if (p === '/api/browser/close' && req.method === 'POST') {
+        await BROWSER.close()
+        return J(res, { ok: true })
+      }
+      return J(res, { error: 'not_found' }, 404)
+    }
+
     if (!['GET', 'HEAD'].includes(req.method || 'GET')) return J(res, { error: 'method_not_allowed' }, 405)
 
     // 静态文件严格按白名单提供：页面、manifest、根目录图片、字体和 data/uploads 图片。
@@ -819,3 +872,10 @@ const server = createServer(async (req, res) => {
 })
 
 server.listen(PORT, HOST_CFG, () => console.log(`PairNest on http://${HOST_CFG}:${PORT}`))
+
+// 服务停掉时别在机器上留一个没人管的 Chrome 进程。
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  process.on(sig, () => {
+    BROWSER.close().catch(() => {}).finally(() => process.exit(0))
+  })
+}

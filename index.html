@@ -668,6 +668,47 @@
   .stile img{width:52px;height:46px;object-fit:contain}
   .tile:active{transform:translateY(2px)}
   .small3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+  /* 小窗：小屋朝外开的那一扇 */
+  .webentry{
+    margin-top:12px;display:flex;align-items:center;gap:12px;padding:11px 14px;
+    background:var(--card);border:2px solid var(--line);border-radius:18px;
+    box-shadow:0 3px 0 var(--line);cursor:pointer
+  }
+  .webentry:active{transform:translateY(2px);box-shadow:0 1px 0 var(--line)}
+  .webentry svg{flex:0 0 auto}
+  .webentry b{font-size:14.5px;display:block}
+  .webentry i{font-style:normal;font-size:12px;color:var(--sub);display:block;margin-top:2px}
+  .webbar{display:flex;gap:8px;margin-bottom:10px}
+  .webbar input{
+    flex:1;min-width:0;font:inherit;font-size:14px;padding:10px 12px;
+    border:2px solid var(--line);border-radius:14px;background:var(--card);
+    color:var(--ink);outline:none
+  }
+  .webbar button,.webact button{
+    font:inherit;font-size:13.5px;font-weight:700;padding:10px 14px;border:0;
+    border-radius:14px;background:var(--pink-d);color:#fff;cursor:pointer;white-space:nowrap
+  }
+  .webbar button:disabled,.webact button:disabled{background:var(--line);cursor:default}
+  .webact{display:flex;gap:8px;margin:10px 0 0}
+  .webact button.ghost{background:var(--card);color:var(--sub);border:2px solid var(--line)}
+  .webstat{font-size:12px;color:var(--sub);margin-bottom:10px;line-height:1.6}
+  .webcard{
+    background:var(--card);border:2px solid var(--line);border-radius:18px;
+    padding:14px;margin-top:12px
+  }
+  .webcard h4{margin:0 0 4px;font-size:15px;line-height:1.5}
+  .webcard .u{font-size:11.5px;color:var(--sub);word-break:break-all;margin-bottom:10px}
+  .webtext{
+    font-size:13px;line-height:1.75;white-space:pre-wrap;word-break:break-word;
+    max-height:46vh;overflow:auto;-webkit-overflow-scrolling:touch
+  }
+  .weblinks{margin-top:12px;border-top:1px dashed var(--line);padding-top:10px}
+  .weblinks a{
+    display:block;font-size:12.5px;color:#8d5560;text-decoration:none;
+    padding:5px 0;word-break:break-all
+  }
+  .webshot img{width:100%;border-radius:12px;border:2px solid var(--line);display:block}
+  .weberr{color:#c84f70;font-size:13px;line-height:1.7}
   .stile{text-align:center;font-size:13px;cursor:pointer}
   .stile div:first-child{
     width:74px;height:70px;margin:0 auto 6px;
@@ -1016,9 +1057,10 @@ let curPage=null;
 function open_(p){
   if(p==='memo') setTimeout(loadMemos,10);
   if(p==='handoff') setTimeout(loadHandoff,10);
+  if(p==='web') setTimeout(initWeb,10);
   const T = {game:'小游戏', memory:'恋爱记忆', loc:'定位', us:'小档案',
              keys:'密钥本', diary:'心情日记', quotes:'原话', mcp:'接过的 MCP', handoff:'窗口交接',
-             anniv:'纪念日', period:'经期记录', mood:'今天心情', memo:'长期记忆',
+             anniv:'纪念日', period:'经期记录', mood:'今天心情', memo:'长期记忆', web:'小窗',
              annivnew:'纪念日', pdset:'经期设置', pdhelp:'经期说明', pet:'云养宠'};
   $('ptitle').textContent = T[p];
   $('pbody').innerHTML = render(p);
@@ -1480,7 +1522,18 @@ function render(p){
       <div class="stile" data-go="anniv"><div><img src="/m-anniv.png?v=2"></div>纪念日</div>
       <div class="stile" data-go="period"><div><img src="/m-period.png?v=2"></div>经期记录</div>
     </div>
-`;
+` + (S.features && S.features.browser ? `
+    <div class="webentry" data-go="web">
+      <svg width="34" height="34" viewBox="0 0 34 34" aria-hidden="true">
+        <rect x="2.5" y="4.5" width="29" height="25" rx="5" fill="#fff0e6" stroke="#8d5560" stroke-width="2"/>
+        <path d="M3 12.5h28" stroke="#8d5560" stroke-width="2"/>
+        <path d="M17 12.5v17" stroke="#8d5560" stroke-width="1.6"/>
+        <circle cx="7.5" cy="8.5" r="1.4" fill="#ff8fae"/>
+        <circle cx="11.8" cy="8.5" r="1.4" fill="#ffd28f"/>
+        <path d="M9 24c2.5-3 5-3 7.5 0" stroke="#ffb3c8" stroke-width="1.8" fill="none" stroke-linecap="round"/>
+      </svg>
+      <div><b>小窗</b><i>让你自己去看看外面的网页</i></div>
+    </div>` : '');
 
   if(p==='pet') return petHtml();
 
@@ -1657,6 +1710,15 @@ function render(p){
 
   if(p==='handoff') return `<div class="foot" style="margin-top:0">换窗口之前留给下一个我的</div>
     <div id="hoBox"><div class="kintro">读取中…</div></div>`;
+
+  if(p==='web') return `<div class="foot" style="margin-top:0">小屋朝外开的一扇窗</div>
+    <div class="webstat" id="webStat">正在看看窗户在不在…</div>
+    <div class="webbar">
+      <input id="webUrl" type="url" inputmode="url" autocomplete="off" autocapitalize="off"
+             spellcheck="false" placeholder="https://…">
+      <button id="webGo">看看</button>
+    </div>
+    <div id="webOut"></div>`;
 
   {
     const born=CAT_BORN;
@@ -2011,6 +2073,111 @@ async function loadMemos(){
         <div class="gbub-b"></div>
       </div>`).join('') || '<div class="kintro">还没有</div>';
   }catch(e){ box.innerHTML='<div class="kintro">读不出来</div>'; }
+}
+
+// ——— 小窗：让服务器那边的浏览器替我们去看一个网页 ———
+// 拿回来的东西全是外面的网页给的，一律当不可信内容处理：文字转义，链接只认 http(s)。
+const webEsc = t => String(t==null?'':t)
+  .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+  .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+const webSafeHref = h => /^https?:\/\//i.test(String(h||'')) ? String(h) : '';
+let webBusy=false;
+
+function webSay(html){ const o=$('webOut'); if(o) o.innerHTML=html; }
+
+async function webStatus(){
+  const el=$('webStat'); if(!el) return null;
+  try{
+    const d=await(await fetch('/api/browser')).json();
+    if(d.error){ el.innerHTML='<span class="weberr">小窗没开：'+webEsc(d.error)+'</span>'; return null; }
+    if(!d.available){
+      el.innerHTML='<span class="weberr">这台服务器上没装 Chrome，小窗打不开。</span>'; return d;
+    }
+    el.innerHTML = (d.running?'窗户开着':'窗户关着（用的时候自己会开）')
+      + (d.visits?'　已经看过 '+d.visits+' 个页面':'')
+      + (d.allowPrivate?'<br>注意：允许访问内网地址，这台机器上的服务它也看得到。':'');
+    return d;
+  }catch(e){ el.innerHTML='<span class="weberr">问不到小窗的状态。</span>'; return null; }
+}
+
+async function webRead(){
+  if(webBusy) return;
+  const inp=$('webUrl'); const btn=$('webGo');
+  let u=(inp.value||'').trim();
+  if(!u) return;
+  if(!/^https?:\/\//i.test(u)){ u='https://'+u; inp.value=u; }
+
+  webBusy=true; btn.disabled=true; btn.textContent='看着…';
+  webSay('<div class="webcard"><div class="webtext">正在打开，第一次要等浏览器启动，可能十几秒…</div></div>');
+  try{
+    const r=await fetch('/api/browser/read',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({url:u})});
+    const d=await r.json();
+    if(!r.ok||d.error){
+      const why={address_not_allowed:'这个地址不让看：它指向内网或本机，出于安全被挡了。',
+        protocol_not_allowed:'只能看 http 和 https 的网页。',
+        invalid_url:'这个网址我看不懂。',
+        chrome_not_found:'服务器上没找到 Chrome，装一个再来。',
+        browser_disabled:'小窗功能在 config.json 里还关着。',
+        url_required:'先写个网址呀。'}[d.error] || ('出错了：'+webEsc(d.error||r.status));
+      webSay('<div class="webcard"><div class="weberr">'+webEsc(why).replace(/&lt;br&gt;/g,'<br>')+'</div></div>');
+      return;
+    }
+    const links=(d.links||[]).slice(0,40).map(l=>{
+      const h=webSafeHref(l.href); if(!h) return '';
+      return '<a href="'+webEsc(h)+'" target="_blank" rel="noopener noreferrer">'+webEsc(l.text)+'</a>';
+    }).join('');
+    webSay('<div class="webcard">'
+      + '<h4>'+webEsc(d.title||'（没有标题）')+'</h4>'
+      + '<div class="u">'+webEsc(d.url)+'　'+(d.ms||0)+'ms</div>'
+      + '<div class="webtext">'+webEsc(d.text||'（这一页没读到文字）')
+      + (d.truncated?'\n\n……太长了，后面截断了。':'')+'</div>'
+      + (links?'<div class="weblinks">'+links+'</div>':'')
+      + (d.blocked&&d.blocked.length?'<div class="u" style="margin:10px 0 0">顺手挡掉了 '
+          +d.blocked.length+' 个指向内网的请求</div>':'')
+      + '</div>'
+      + '<div class="webact"><button id="webShot">拍张照</button>'
+      + '<button class="ghost" id="webOff">关掉窗户</button></div>'
+      + '<div class="webshot" id="webShotBox"></div>');
+    webStatus();
+  }catch(e){
+    webSay('<div class="webcard"><div class="weberr">没连上小屋的服务器。</div></div>');
+  }finally{ webBusy=false; btn.disabled=false; btn.textContent='看看'; }
+}
+
+async function webShot(){
+  const box=$('webShotBox'), btn=$('webShot'); if(!box) return;
+  const u=($('webUrl').value||'').trim(); if(!u) return;
+  btn.disabled=true; btn.textContent='拍着…';
+  try{
+    const r=await fetch('/api/browser/shot',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({url:u})});
+    if(!r.ok){ box.innerHTML='<div class="weberr" style="margin-top:10px">没拍成。</div>'; return; }
+    const b=await r.blob();
+    const old=box.dataset.url; if(old) URL.revokeObjectURL(old);
+    const src=URL.createObjectURL(b);
+    box.dataset.url=src;
+    box.innerHTML='<div class="webcard" style="padding:10px"><img alt="网页截图" src="'+src+'"></div>';
+  }catch(e){ box.innerHTML='<div class="weberr" style="margin-top:10px">没拍成。</div>'; }
+  finally{ btn.disabled=false; btn.textContent='再拍一张'; }
+}
+
+async function webOff(){
+  const btn=$('webOff'); btn.disabled=true; btn.textContent='关着…';
+  try{ await fetch('/api/browser/close',{method:'POST'}); }catch(e){}
+  btn.textContent='已经关了'; webStatus();
+}
+
+function initWeb(){
+  webStatus();
+  const go=$('webGo'), inp=$('webUrl');
+  if(go) go.onclick=webRead;
+  if(inp) inp.onkeydown=e=>{ if(e.key==='Enter'){ e.preventDefault(); inp.blur(); webRead(); } };
+  const out=$('webOut');
+  if(out) out.onclick=e=>{
+    if(e.target.closest('#webShot')) webShot();
+    else if(e.target.closest('#webOff')) webOff();
+  };
 }
 
 async function loadHandoff(){

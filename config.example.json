@@ -28,7 +28,13 @@
     "location": false,
     "keyring": false,
     "memories": false,
-    "handoff": false
+    "handoff": false,
+    "browser": false
+  },
+  "browser": {
+    "allowPrivate": false,
+    "allowScript": false,
+    "idleMinutes": 5
   },
   "amap": {
     "web_service": {
